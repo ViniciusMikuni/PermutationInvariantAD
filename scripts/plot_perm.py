@@ -18,21 +18,35 @@ def evaluate(model,particles,jets,mask,nsplit=1):
     part_split = np.array_split(particles,nsplit)
     jet_split = np.array_split(jets,nsplit)
     mask_split = np.array_split(mask,nsplit)
-    likelihoods = []
+    
+    likelihoods_jet = []
+    likelihoods_part = []
+    Ns = []
     start = time.time()
     for i in range(nsplit):
-        #if i> 1:break
+        print(i,part_split[i].shape[0])
+        #if i> 0:break
         ll_part = []
+        ll_jet = []
         for _ in range(1):
-            llp = model.get_likelihood(part_split[i],jet_split[i],mask_split[i])
+            llp,llj = model.get_likelihood(part_split[i],jet_split[i],mask_split[i])
             ll_part.append(llp)
+            ll_jet.append(llj)
         ll_part = np.median(ll_part,0)
-        likelihoods.append(ll_part)
-    likelihoods = np.concatenate(likelihoods)
+        ll_jet = np.median(ll_jet,0)
+        
+        likelihoods_part.append(ll_part)
+        likelihoods_jet.append(ll_jet)
+        Ns.append(np.sum(mask_split[i],(1,2)))
+        
+    likelihoods_part = np.concatenate(likelihoods_part)
+    likelihoods_jet = np.concatenate(likelihoods_jet)
+    Ns = np.concatenate(Ns)
+    
     end = time.time()
     print("Time for sampling {} events is {} seconds".format(particles.shape[0],end - start))
-    qs = np.quantile(likelihoods,[0.001,0.999])
-    return np.clip(likelihoods,qs[0],qs[1])
+    
+    return {'ll_part':likelihoods_part,'ll_jet': likelihoods_jet,'N': Ns}
 
 
 if __name__ == "__main__":
@@ -82,12 +96,13 @@ if __name__ == "__main__":
         particles,jets,mask = utils.DataLoader(flags.data_folder,
                                                labels=['%s.h5'%process],
                                                part='gluon_tagging', #name of the preprocessing file, the same for all datasets
+                                               use_train=False,
                                                make_tf_data=False)
 
         #pick just a single event
-        particles = particles[:1]
-        jets = jets[:1]
-        mask = mask[:1]
+        particles = particles[3:4]
+        jets = jets[3:4]
+        mask = mask[3:4]
             
         #Repeat the same entry multiple times to evaluate the fluctuation of the logp
         nrepeat = 10
@@ -99,9 +114,9 @@ if __name__ == "__main__":
 
         for _ in range(flags.nshuffle):
             perm = np.random.permutation(range(npart)).reshape(1,npart,1)
-            nll = -evaluate(model_gluon,np.take_along_axis(particles,perm,1),
+            nll = evaluate(model_gluon,np.take_along_axis(particles,perm,1),
                             jets,np.take_along_axis(mask,perm,1))
-            nll_list[process].append(np.array([np.mean(nll),np.std(nll)]))
+            nll_list[process].append(np.array([-np.mean(nll['ll_part']),np.std(nll['ll_part'])]))
 
         nll_list[process] = np.reshape(nll_list[process],(flags.nshuffle,2))
         print(nll_list[process].shape)
@@ -113,6 +128,6 @@ if __name__ == "__main__":
                      marker='o',color=utils.colors[process])
     
     ax0.legend(loc='best',fontsize=16,ncol=1)
-    ax0.set_ylim(top=1.7)
+    ax0.set_ylim(bottom=38,top=75)
     utils.FormatFig(xlabel = 'Permutation index', ylabel = 'Negative Log-Likelihood',ax0=ax0) 
     fig.savefig('{}/nll_permutations.pdf'.format(flags.plot_folder),bbox_inches='tight')

@@ -54,15 +54,15 @@ def clustering_sum(data,folder,nevents=1000,nparts=100):
 
     points[:,:,0] = (eta - np.expand_dims(jets_eta,-1))*(pt!=0)
     points[:,:,1] = delta_phi*(pt!=0)
-    points[:,:,2] = np.ma.log(pt)
+    points[:,:,2] = np.ma.log(1.0 - pt/jets_pt[:,None]).filled(0)
     points[:,:,3] = (pt>0.0).astype(np.float32)
     
     
-    jet_info = np.zeros((particles.shape[0],3))
-    # jet_info[:,0] += jets_pt
-    jet_info[:,0] += jets_eta
-    jet_info[:,1] += jets_mass
-    jet_info[:,2] += np.sum(pt>0.0 , 1)
+    jet_info = np.zeros((particles.shape[0],4))
+    jet_info[:,0] += jets_pt
+    jet_info[:,1] += jets_eta
+    jet_info[:,2] += jets_mass
+    jet_info[:,3] += np.sum(pt>0.0 , 1)
 
     
     with h5py.File('{}/top_tagging.h5'.format(folder), "w") as fh5:
@@ -92,4 +92,4 @@ if __name__=='__main__':
     store = pd.HDFStore(os.path.join(samples_path,sample))
     data = store['table'].values
     #data.shape[0]
-    clustering_sum(data,data.shape[0],samples_path,NPARTS)
+    clustering_sum(data,samples_path,data.shape[0],NPARTS)

@@ -35,7 +35,8 @@ if __name__ == "__main__":
     config = utils.LoadJson(flags.config)
     npart = 100
         
-    labels = [flags.dataset+'.h5',flags.dataset+'2.h5',flags.dataset+'3.h5']    
+    labels = [flags.dataset+'3.h5',flags.dataset+'.h5',flags.dataset+'2.h5',]
+    #flags.dataset+'.h5',flags.dataset+'2.h5',
     
     data_size,training_data,test_data = utils.DataLoader(flags.data_path,
                                                          labels,
@@ -77,9 +78,9 @@ if __name__ == "__main__":
         
         inputs, outputs = DeepSetsAttClass(
             config['NUM_FEAT'],
-            num_heads=1,
-            num_transformer = 8,
-            projection_dim = 64,
+            num_heads=2,
+            num_transformer = 6,
+            projection_dim = 128,
         )
         model = keras.Model(inputs=inputs,outputs=outputs)
         
@@ -123,7 +124,7 @@ if __name__ == "__main__":
     callbacks = [
         hvd.callbacks.BroadcastGlobalVariablesCallback(0),
         hvd.callbacks.MetricAverageCallback(),
-        EarlyStopping(patience=100,restore_best_weights=True),
+        EarlyStopping(patience=30,restore_best_weights=True),
     ]
 
         
