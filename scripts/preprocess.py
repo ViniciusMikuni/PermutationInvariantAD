@@ -55,6 +55,7 @@ def clustering_sum(data,folder,nevents=1000,nparts=100):
     points[:,:,0] = (eta - np.expand_dims(jets_eta,-1))*(pt!=0)
     points[:,:,1] = delta_phi*(pt!=0)
     points[:,:,2] = np.ma.log(1.0 - pt/jets_pt[:,None]).filled(0)
+    #points[:,:,2] = np.ma.log(pt).filled(0)
     points[:,:,3] = (pt>0.0).astype(np.float32)
     
     
@@ -65,11 +66,11 @@ def clustering_sum(data,folder,nevents=1000,nparts=100):
     jet_info[:,3] += np.sum(pt>0.0 , 1)
 
     
-    with h5py.File('{}/top_tagging.h5'.format(folder), "w") as fh5:
+    with h5py.File('{}/top_tagging3.h5'.format(folder), "w") as fh5:
         dset = fh5.create_dataset('particle_features', data=points[npid==1])
         dset = fh5.create_dataset('jet_features', data=jet_info[npid==1])
 
-    with h5py.File('{}/gluon_tagging.h5'.format(folder), "w") as fh5:
+    with h5py.File('{}/gluon_tagging3.h5'.format(folder), "w") as fh5:
         dset = fh5.create_dataset('particle_features', data=points[npid==0])
         dset = fh5.create_dataset('jet_features', data=jet_info[npid==0])
 
@@ -80,7 +81,7 @@ if __name__=='__main__':
     parser = OptionParser(usage="%prog [opt]  inputFiles")
     parser.add_option("--npoints", type=int, default=100, help="Number of particles per event")
     parser.add_option("--folder", type="string", default='/global/cfs/cdirs/m3929/TOP/', help="Folder containing input files")
-    parser.add_option("--sample", type="string", default='train.h5', help="Input file name")
+    parser.add_option("--sample", type="string", default='val.h5', help="Input file name")
 
     (flags, args) = parser.parse_args()
         
@@ -91,5 +92,6 @@ if __name__=='__main__':
 
     store = pd.HDFStore(os.path.join(samples_path,sample))
     data = store['table'].values
-    #data.shape[0]
+    # print(data.shape[0])
+    # input()
     clustering_sum(data,samples_path,data.shape[0],NPARTS)

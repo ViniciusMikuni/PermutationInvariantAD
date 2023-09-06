@@ -3,17 +3,18 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers, Input
 import time
-#import horovod.tensorflow.keras as hvd
+import horovod.tensorflow as hvd
 import utils
 import tensorflow_probability as tfp
 from deepsets_cond import DeepSetsAtt, Resnet
 from tensorflow.keras.activations import swish, relu
 import gc
+from tensorflow_probability.python.math.diag_jacobian import diag_jacobian
 #tf.random.set_seed(1234)
 
 class GSGM(keras.Model):
     """Score based generative model"""
-    def __init__(self,name='SGM',npart=30,
+    def __init__(self,name='SGM',npart=100,
                  particle='gluon_tagging',
                  ll_training=False,config=None):
         super(GSGM, self).__init__()
@@ -24,11 +25,6 @@ class GSGM(keras.Model):
 
         self.activation = layers.LeakyReLU(alpha=0.01)
         
-        self.beta_0 = 0.1
-        self.beta_1 = 20.0
-
-        self.beta = 0.0
-        self.alpha = 0.01
         
         #self.activation = layers.LeakyReLU(alpha=0.01)
         self.num_feat = self.config['NUM_FEAT']
@@ -39,6 +35,8 @@ class GSGM(keras.Model):
         self.particle = particle
         self.ll_training = ll_training
         self.ema=0.999
+        self.minlogsnr = -10.0
+        self.maxlogsnr = 10.0
 
         
         self.projection = self.GaussianFourierProjection(scale = 16)
@@ -48,18 +46,16 @@ class GSGM(keras.Model):
         #Transformation applied to conditional inputs
         inputs_time = Input((1))
         inputs_jet = Input((self.num_jet))
-        inputs_particles = Input((None,self.num_feat))
+        inputs_particles = Input((None,2*self.num_feat))
         inputs_mask = Input((None,1)) #mask to identify zero-padded objects
-        
+
 
         graph_conditional = self.Embedding(inputs_time,self.projection)
         jet_conditional = self.Embedding(inputs_time,self.projection)
         
-        #ff_jet = self.FF(inputs_jet)
         dense_jet = layers.Dense(self.num_embed,activation=None)(inputs_jet) 
         dense_jet = self.activation(dense_jet)     
 
-        
         graph_conditional = layers.Dense(self.num_embed,activation=None)(tf.concat(
             [graph_conditional,dense_jet],-1))
         graph_conditional=self.activation(graph_conditional)
@@ -129,15 +125,21 @@ class GSGM(keras.Model):
     def prior_sde(self,dimensions):
         return tf.random.normal(dimensions,dtype=tf.float32)
 
+
+    def Featurizer(self,features):
+        z = 1.0 - tf.exp(features[:,:,2])
+        dr = tf.sqrt(features[:,:,0]**2 + features[:,:,1]**2)
+        e2 =  (1.0 + tf.math.sinh(features[:,:,0])**2)*z**2
+        add_features = tf.stack([z,dr,e2],-1)
+        return tf.concat([features,add_features],-1)
+    
     def FF(self,features,expand=False):
         #Gaussian features to the inputs
         max_proj = 8
         min_proj = 6
         freq = tf.range(start=min_proj, limit=max_proj, dtype=tf.float32)
         freq = 2.**(freq) * 2 * np.pi        
-
-        x = layers.Dense(self.num_jet,activation='tanh')(features)   #normalize to the range [-1,1]
-        #x = features
+        x = features
         freq = tf.tile(freq[None, :], ( 1, tf.shape(x)[-1]))  
         h = tf.repeat(x, max_proj-min_proj, axis=-1)
         if expand:
@@ -147,88 +149,79 @@ class GSGM(keras.Model):
         h = tf.concat([tf.math.sin(angle),tf.math.cos(angle)],-1)
         return tf.concat([features,h],-1)
 
+    @tf.function
+    def logsnr_schedule_cosine(self,t, logsnr_min, logsnr_max):
+        #if self.ll_training:return logsnr_max - tf.cast(t,tf.float32)*(logsnr_max - logsnr_min)
     
-    def marginal_prob(self,t,shape=None):        
-        log_mean_coeff = -0.25 * t ** 2 * (self.beta_1 - self.beta_0) - 0.5 * t * self.beta_0        
-        if shape is None:
-            shape=self.shape
-        log_mean_coeff = tf.reshape(log_mean_coeff,shape)
-        mean = tf.exp(log_mean_coeff)
-        std = tf.math.sqrt(1 - tf.exp(2. * log_mean_coeff))
-        return tf.cast(mean,tf.float32), tf.cast(std,tf.float32)
-
-    def sde(self,t,shape=None):        
-        beta_t = self.beta_0 + t * (self.beta_1 - self.beta_0)
-        if shape is None:
-            shape=self.shape
-        beta_t = tf.reshape(beta_t,shape)
-        drift = -0.5 * beta_t
-        diffusion = beta_t
-
-        return tf.cast(drift,tf.float32), tf.cast(diffusion,tf.float32)
-
+        b = tf.math.atan(tf.exp(-0.5 * logsnr_max))
+        a = tf.math.atan(tf.exp(-0.5 * logsnr_min)) - b
+        return -2. * tf.math.log(tf.math.tan(a * tf.cast(t,tf.float32) + b))
+    
+    @tf.function
+    def get_logsnr_alpha_sigma(self,time,shape=None):
+        logsnr = self.logsnr_schedule_cosine(time,logsnr_min=self.minlogsnr, logsnr_max=self.maxlogsnr)
+        alpha = tf.sqrt(tf.math.sigmoid(logsnr))
+        sigma = tf.sqrt(tf.math.sigmoid(-logsnr))
+        if shape is not None:
+            alpha = tf.reshape(alpha,shape)
+            sigma = tf.reshape(sigma,shape)
+        return logsnr, alpha, sigma
 
     @tf.function
-    def likelihood_importance_cum_weight(self, t, eps=1e-5):
-        #VPSDE
-        exponent1 = 0.5 * eps * (eps - 2) * self.beta_0 - 0.5 * eps ** 2 * self.beta_1
-        exponent2 = 0.5 * t * (t - 2) * self.beta_0 - 0.5 * t ** 2 * self.beta_1
-        term1 = tf.where(tf.abs(exponent1) <= 1e-3, -exponent1, 1. - tf.exp(exponent1))
-        term2 = tf.where(tf.abs(exponent2) <= 1e-3, -exponent2, 1. - tf.exp(exponent2))
-        return 0.5 * (-2 * tf.math.log(term1) + 2 * tf.math.log(term2)
-                      + self.beta_0 * (-2 * eps + eps ** 2 - (t - 2) * t)
-                      + self.beta_1 * (-eps ** 2 + t ** 2))
+    def inv_logsnr_schedule_cosine(self,logsnr, logsnr_min, logsnr_max):
+        #if self.ll_training:return (logsnr_max - logsnr)/(logsnr_max - logsnr_min)
+        b = tf.math.atan(tf.exp(-0.5 * logsnr_max))
+        a = tf.math.atan(tf.exp(-0.5 * logsnr_min)) - b
+        return tf.math.atan(tf.exp(-0.5 * tf.cast(logsnr,tf.float32)))/a -b/a
 
+        
     @tf.function
-    def sample_importance_weighted_time_for_likelihood(self, shape, quantile=None, eps=1e-5, steps=100):
-        Z = self.likelihood_importance_cum_weight(1.0, eps=eps)
-        if quantile is None:
-            quantile = tf.random.uniform(shape, minval=0, maxval=Z, dtype=tf.float32)
-        lb = tf.ones_like(quantile) * eps
-        ub = tf.ones_like(quantile) * 1.0
+    def get_sde(self,time,shape=None):
 
-        def bisection_func(carry, idx):
-            lb, ub = carry
-            lb = tf.cast(lb,tf.float32)
-            ub = tf.cast(ub,tf.float32)
-            mid = (lb + ub) / 2.0
-            value = self.likelihood_importance_cum_weight(mid, eps=eps)
-            lb = tf.where(value <= quantile, mid, lb)
-            ub = tf.where(value <= quantile, ub, mid)
-            return (lb, ub), idx
+        with tf.GradientTape(persistent=True,
+                             watch_accessed_variables=False) as tape2:
+            tape2.watch(time)
+            logsnr,alpha,sigma = self.get_logsnr_alpha_sigma(time)
+            logalpha= tf.math.log(alpha)
+            
 
-        for i in tf.range(0,steps):
-            (lb, ub), _ = bisection_func((lb, ub), i)
-        
-        return (lb + ub) / 2.0
+        f = tape2.gradient(logalpha, time)
+        g2 = -sigma**2*tf.cast(tape2.gradient(logsnr, time),tf.float32)
 
-    def inv_var(self,var):
-        c = tf.math.log(1 - var) 
-        a = self.beta_1 - self.beta_0
-        t = (-self.beta_0 + tf.sqrt(self.beta_0**2 - 2 * a * c)) / a
-        return t
+        if shape is None:
+            shape=self.shape
+        f = tf.reshape(f,shape)
+        g2 = tf.reshape(g2,shape)
+        return tf.cast(f,tf.float32), tf.cast(g2,tf.float32)
+
     
-    def is_latent(self,t,eps=1e-5):
-        ones = tf.ones_like(t)
-        _,sigma2_1 = self.marginal_prob(ones,shape=(-1,1))
-        sigma2_1 = sigma2_1**2
-        _,sigma2_eps = self.marginal_prob(eps * ones,shape=(-1,1))
-        sigma2_eps = sigma2_eps**2
-        log_sigma2_1, log_sigma2_eps = tf.math.log(sigma2_1), tf.math.log(sigma2_eps)
-        var_t = tf.exp(t * log_sigma2_1 + (1 - t) * log_sigma2_eps)
-        t = self.inv_var(var_t)
-        mean,_ = self.marginal_prob(t)
-        std = tf.reshape(tf.sqrt(var_t),self.shape)
-        
-        return t,mean,std, 0.5 * (log_sigma2_1 - log_sigma2_eps) / (1.0 - var_t)
-        
+
+    def marginal_prob(self,t,shape=None):
+        logsnr, mean, sigma = self.get_logsnr_alpha_sigma(t)
+        if shape is None:
+            shape=self.shape
+        mean = tf.reshape(mean,shape)
+        sigma = tf.reshape(sigma,shape)
+        return mean, sigma
+
+    def sde(self,t,shape=None):
+        logsnr, alpha, sigma = self.get_logsnr_alpha_sigma(t)
+        drift = -0.5*np.pi*sigma/alpha
+        diffusion2 = np.pi*sigma/alpha
+        if shape is None:
+            shape=self.shape
+        drift = tf.reshape(drift,shape)
+        diffusion2 = tf.reshape(diffusion2,shape)
+
+        return tf.cast(drift,tf.float32), tf.cast(diffusion2,tf.float32)
+
 
     @tf.function
     def eval_model(self,model,x,t,jet=None,mask=None):
         if jet is None:
             score = model([x, t])
         else:
-            score = model([x*mask, t,jet,mask])*mask
+            score = model([self.Featurizer(x)*mask, t,jet,mask])*mask
         return score
     
     
@@ -236,29 +229,41 @@ class GSGM(keras.Model):
     def train_step(self, inputs):
         eps=1e-5        
         part,jet,mask = inputs
+            
+        random_t = tf.random.uniform((tf.shape(jet)[0],1))
         
-        random_t = tf.random.uniform((tf.shape(jet)[0],1))*(1-eps) + eps
         if self.ll_training:
-            random_t = self.sample_importance_weighted_time_for_likelihood((tf.shape(part)[0],1), eps=eps)
-        #     random_t,mean,std,w = self.is_latent(random_t)
-        # else:
-        #     mean,std = self.marginal_prob(random_t)
-        #     w = tf.ones_like(random_t)
-        
-        mean,std = self.marginal_prob(random_t)
-        
+            #Uniform sampling in logSNR
+            random_t = self.inv_logsnr_schedule_cosine(
+                (self.maxlogsnr -self.minlogsnr)*random_t + self.minlogsnr,
+                logsnr_min=self.minlogsnr, logsnr_max=self.maxlogsnr
+            )
+
+            
+            
+        logsnr, alpha, sigma = self.get_logsnr_alpha_sigma(random_t)
+        alpha_reshape = tf.reshape(alpha,self.shape)
+        sigma_reshape = tf.reshape(sigma,self.shape)
+
 
         with tf.GradientTape() as tape:
             #part
-            z = tf.random.normal((tf.shape(part)),dtype=tf.float32)
-                    
-            perturbed_x = mean*part + z * std 
-            score = self.model_part([perturbed_x*mask, random_t,jet,mask])
+            z = tf.random.normal((tf.shape(part)),dtype=tf.float32)                    
+            perturbed_x = alpha_reshape*part + z * sigma_reshape
+            pred = self.model_part([self.Featurizer(perturbed_x)*mask,
+                                    (logsnr-self.minlogsnr)/(self.maxlogsnr -self.minlogsnr),jet,mask])
             
-            losses = tf.square(score - z)*mask
+            if self.ll_training:
+                noise = sigma_reshape * perturbed_x + alpha_reshape * pred
+                losses = tf.square(z - noise)*mask
+            else:
+                v = alpha_reshape * z - sigma_reshape * part            
+                losses = tf.square(pred - v)*mask
+                
             loss_part = tf.reduce_mean(tf.reshape(losses,(tf.shape(losses)[0], -1)))
             
         trainable_variables = self.model_part.trainable_variables
+        tape = hvd.DistributedGradientTape(tape) 
         g = tape.gradient(loss_part, trainable_variables)
         g = [tf.clip_by_norm(grad, 1)
              for grad in g]
@@ -267,18 +272,26 @@ class GSGM(keras.Model):
 
         for weight, ema_weight in zip(self.model_part.weights, self.ema_part.weights):
             ema_weight.assign(self.ema * ema_weight + (1 - self.ema) * weight)
-        
+
+
         with tf.GradientTape() as tape:
             #jet
             z = tf.random.normal((tf.shape(jet)),dtype=tf.float32)
             
-            perturbed_x = tf.reshape(mean,(-1,1))*jet + z * tf.reshape(std,(-1,1))
-            score = self.model_jet([perturbed_x, random_t])
-            
-            losses = tf.square(score- z)
+            perturbed_x = alpha*jet + z * sigma
+            pred = self.model_jet([perturbed_x,
+                                   (logsnr-self.minlogsnr)/(self.maxlogsnr -self.minlogsnr)])
+            if self.ll_training:
+                noise = sigma * perturbed_x + alpha * pred
+                losses = tf.square(z - noise)
+            else:
+                v = alpha* z - sigma* jet
+                losses = tf.square(pred - v)
+                
             loss_jet = tf.reduce_mean(tf.reshape(losses,(tf.shape(losses)[0], -1)))
  
-        trainable_variables = self.model_jet.trainable_variables 
+        trainable_variables = self.model_jet.trainable_variables
+        tape = hvd.DistributedGradientTape(tape) 
         g = tape.gradient(loss_jet, trainable_variables)
         g = [tf.clip_by_norm(grad, 1)
              for grad in g]
@@ -302,29 +315,47 @@ class GSGM(keras.Model):
     def test_step(self, inputs):
         eps = 1e-5
         part,jet,mask = inputs
-
-        random_t = tf.random.uniform((tf.shape(jet)[0],1))*(1-eps) + eps
+        
+        random_t = tf.random.uniform((tf.shape(jet)[0],1))
+        
         if self.ll_training:
-            random_t = self.sample_importance_weighted_time_for_likelihood((tf.shape(part)[0],1), eps=eps)
-            #random_t,mean,std,w = self.is_latent(random_t)
-        #else:
-        mean,std = self.marginal_prob(random_t)
-        #    w = tf.ones_like(random_t)
+            random_t = self.inv_logsnr_schedule_cosine(
+                (self.maxlogsnr -self.minlogsnr)*random_t + self.minlogsnr,
+                logsnr_min=self.minlogsnr, logsnr_max=self.maxlogsnr
+            )
 
+        
+        logsnr, alpha, sigma = self.get_logsnr_alpha_sigma(random_t)
+        alpha_reshape = tf.reshape(alpha,self.shape)
+        sigma_reshape = tf.reshape(sigma,self.shape)
+ 
         #part
         z = tf.random.normal((tf.shape(part)),dtype=tf.float32)
-        perturbed_x = mean*part + z * std 
-        score = self.model_part([perturbed_x, random_t,jet,mask])            
-        losses = tf.square(score- z)*mask
+        perturbed_x = alpha_reshape*part + z * sigma_reshape
+        pred = self.model_part([self.Featurizer(perturbed_x)*mask,
+                                (logsnr-self.minlogsnr)/(self.maxlogsnr -self.minlogsnr),jet,mask])
+        if self.ll_training:
+            noise = sigma_reshape * perturbed_x + alpha_reshape * pred
+            losses = tf.square(z - noise)*mask
+        else:
+            v = alpha_reshape * z - sigma_reshape * part            
+            losses = tf.square(pred - v)*mask
                         
         loss_part = tf.reduce_mean(tf.reshape(losses,(tf.shape(losses)[0], -1)))
                     
         #jet
         z = tf.random.normal((tf.shape(jet)),dtype=tf.float32)
-        mean,std = self.marginal_prob(random_t,shape=(-1,1))
-        perturbed_x = mean*jet + z * std
-        score = self.model_jet([perturbed_x, random_t])
-        losses = tf.square(score- z)
+        
+        perturbed_x = alpha*jet + z * sigma
+        pred = self.model_jet([perturbed_x,
+                               (logsnr-self.minlogsnr)/(self.maxlogsnr -self.minlogsnr)])
+        if self.ll_training:
+            noise = sigma * perturbed_x + alpha * pred
+            losses = tf.square(z - noise)
+        else:
+            v = alpha* z - sigma* jet
+            losses = tf.square(pred- v)
+        
         loss_jet = tf.reduce_mean(tf.reshape(losses,(tf.shape(losses)[0], -1)))
         self.loss_tracker.update_state(loss_jet + loss_part)
         
@@ -344,8 +375,6 @@ class GSGM(keras.Model):
         start = time.time()
         ll_jet = self.Likelihood(jet,self.ema_jet)
         ll_part = self.Likelihood(part,self.ema_part,jet=jet,mask=mask)
-        #ll_part = ll_jet
-        #ll_jet = ll_part
         return ll_part, ll_jet
 
 
@@ -356,11 +385,13 @@ class GSGM(keras.Model):
                    model,
                    jet=None,
                    mask=None,
-                   atol=1e-5,
-                   eps=1e-5
+                   atol=5e-5,
+                   eps=1e-4,
+                   exact = True,
     ):
 
         from scipy import integrate
+
         gc.collect()
         batch_size = sample.shape[0]        
         shape = sample.shape
@@ -379,27 +410,53 @@ class GSGM(keras.Model):
             standard deviation sigma."""
             shape = z.shape            
             return -N / 2. * np.log(2*np.pi) - np.sum(z.reshape((shape[0],-1))**2, -1) / 2. 
+
         
         @tf.function
         def divergence_eval_wrapper(sample, time_steps,
                                     jet=None,mask=None):
             
             sample = tf.cast(tf.reshape(sample,shape),tf.float32)
-            f,g2 = self.sde(time_steps,shape=const_shape)
-            mean,std = self.marginal_prob(time_steps,shape=const_shape)
+            time_steps = tf.reshape(time_steps,(sample.shape[0], 1))
+            time_steps = self.inv_logsnr_schedule_cosine(2*time_steps,
+                                                         logsnr_min=self.minlogsnr,
+                                                         logsnr_max=self.maxlogsnr
+                                                         )
+            
+            logsnr_steps, alpha, sigma = self.get_logsnr_alpha_sigma(time_steps,shape=const_shape)
             epsilons = tfp.random.rademacher(sample.shape,dtype=tf.float32)
+            #epsilons = tf.random.normal(sample.shape,dtype=tf.float32)            
             if mask is not None:
                 sample*=mask
                 epsilons*=mask
-            with tf.GradientTape(persistent=False,
-                                 watch_accessed_variables=False) as tape:
-                tape.watch(sample)
 
-                score = self.eval_model(model,sample,time_steps,jet,mask)                
-                drift = f*sample + 0.5*g2*score/std
+            if exact:
+                # Exact trace estimation
+                fn = lambda x: -sigma*alpha*self.eval_model(model, x,
+                            (logsnr_steps-self.minlogsnr)/(self.maxlogsnr -self.minlogsnr),jet,mask)
+            
+
+                pred, diag_jac = diag_jacobian(
+                xs=sample, fn=fn, sample_shape=[batch_size])
+
+                if isinstance(pred, list):
+                    pred = pred[0]
+                    if isinstance(diag_jac, list):
+                        diag_jac = diag_jac[0]
+            
+                return tf.reshape(pred,[-1]), - tf.reduce_sum(tf.reshape(diag_jac,(batch_size,-1)), -1)
+            else:
                 
-            jvp = tf.cast(tape.gradient(drift, sample,epsilons),tf.float32)
-            return  tf.reshape(drift,[-1]), - tf.reduce_sum(tf.reshape(jvp*epsilons,(batch_size,-1)), -1)
+                with tf.GradientTape(persistent=False,
+                                     watch_accessed_variables=False) as tape:
+                    tape.watch(sample)
+                    pred = self.eval_model(model,sample,
+                                           (logsnr_steps-self.minlogsnr)/(self.maxlogsnr -self.minlogsnr),
+                                           jet,mask)                
+                    drift = -sigma*alpha*pred
+                
+                jvp = tf.cast(tape.gradient(drift, sample,epsilons),tf.float32)            
+                return  tf.reshape(drift,[-1]), - tf.reduce_sum(tf.reshape(jvp*epsilons,(batch_size,-1)), -1)
 
 
 
@@ -413,9 +470,12 @@ class GSGM(keras.Model):
     
         init_x = np.concatenate([sample.reshape([-1]),np.zeros((batch_size,))],0)
         res = integrate.solve_ivp(
-            ode_func, (eps,1.0-eps), init_x,
+            ode_func,
+            #(eps,1.0-eps),
+            (self.maxlogsnr/2.0 - eps,self.minlogsnr/2.0+eps),
+            init_x,
             #max_step=5e-3,
-            rtol=1e-4, atol=atol, method='RK45')
+            rtol=5e-4, atol=atol, method='RK23')
     
         zp = res.y[:, -1]
         z = zp[:-batch_size].reshape(shape)
@@ -424,6 +484,4 @@ class GSGM(keras.Model):
             
         delta_logp = zp[-batch_size:].reshape(batch_size)
         prior_logp = prior_likelihood(z)
-
         return (prior_logp - delta_logp)
-

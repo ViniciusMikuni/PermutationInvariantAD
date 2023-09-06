@@ -80,7 +80,6 @@ if __name__ == "__main__":
         
     model_name += add_text
     processes = ['gluon_tagging','top_tagging','HV']
-    #processes = ['HV']
     
 
 
@@ -100,34 +99,31 @@ if __name__ == "__main__":
                                                make_tf_data=False)
 
         #pick just a single event
-        particles = particles[3:4]
-        jets = jets[3:4]
-        mask = mask[3:4]
-            
-        #Repeat the same entry multiple times to evaluate the fluctuation of the logp
-        nrepeat = 10
-        particles = np.repeat(particles,nrepeat,0)
-        jets = np.repeat(jets,nrepeat,0)
-        mask = np.repeat(mask,nrepeat,0)
+        particle = particles[3]
+        jet = jets[3]
+        mask = mask[3]
 
-        nll_list[process] = []
-
+        particles = []
+        masks = []
+        jets = np.tile(jet,(flags.nshuffle,1))
         for _ in range(flags.nshuffle):
-            perm = np.random.permutation(range(npart)).reshape(1,npart,1)
-            nll = evaluate(model_gluon,np.take_along_axis(particles,perm,1),
-                            jets,np.take_along_axis(mask,perm,1))
-            nll_list[process].append(np.array([-np.mean(nll['ll_part']),np.std(nll['ll_part'])]))
+            perm = np.random.permutation(range(npart)).reshape(npart,1)
+            particles.append(np.take_along_axis(particle,perm,0))
+            masks.append(np.take_along_axis(mask,perm,0))
 
-        nll_list[process] = np.reshape(nll_list[process],(flags.nshuffle,2))
-        print(nll_list[process].shape)
-        ax0.errorbar(range(flags.nshuffle),
-                     nll_list[process][:,0],                     
-                     yerr=nll_list[process][:,1],
-                     ls='none',
-                     label=utils.name_translate[process],
-                     marker='o',color=utils.colors[process])
+
+        nll = evaluate(model_gluon,np.array(particles),
+                       jets,masks)
+
+        nll_list[process] = -nll['ll_part']
+        
+        ax0.plot(range(flags.nshuffle),
+                 nll_list[process],
+                 ls='none',
+                 label=utils.name_translate[process],
+                 marker='o',color=utils.colors[process])
     
     ax0.legend(loc='best',fontsize=16,ncol=1)
-    ax0.set_ylim(bottom=38,top=75)
+    ax0.set_ylim(bottom=10,top=170)
     utils.FormatFig(xlabel = 'Permutation index', ylabel = 'Negative Log-Likelihood',ax0=ax0) 
     fig.savefig('{}/nll_permutations.pdf'.format(flags.plot_folder),bbox_inches='tight')

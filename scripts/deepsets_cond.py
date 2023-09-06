@@ -50,31 +50,27 @@ def DeepSetsAtt(
 
         # Create a multi-head attention layer.
         attention_output = layers.MultiHeadAttention(
-            num_heads=num_heads, key_dim=projection_dim//num_heads,
-            dropout=0.1)(x1, x1, attention_mask=tf.cast(mask_matrix,tf.bool))
+            num_heads=num_heads, key_dim=projection_dim//num_heads
+        )(x1, x1, attention_mask=tf.cast(mask_matrix,tf.bool))
         # Skip connection 1.
         x2 = layers.Add()([attention_output, encoded_patches])
             
         # Layer normalization 2.
         x3 = layers.LayerNormalization(epsilon=1e-6)(x2)
-        x3 = layers.Dense(2*projection_dim,activation="gelu")(x3)
+        x3 = layers.Dense(4*projection_dim,activation="gelu")(x3)
         x3 = layers.Dense(projection_dim,activation="gelu")(x3)
 
+        x4 = layers.Dense(projection_dim,activation="gelu")(time)
         # Skip connection 2.
-        encoded_patches = layers.Add()([x3, x2])
+        encoded_patches = layers.Add()([x3, x2, x4])
         
 
     representation = layers.LayerNormalization(epsilon=1e-6)(encoded_patches)
-    representation_mean = layers.GlobalAvgPool1D()(representation)
-    representation_mean = layers.Concatenate(-1)([representation_mean,time_embedding])
-    representation_mean = layers.Reshape((1,-1))(representation_mean)
-    representation_mean = tf.tile(representation_mean,(1,tf.shape(inputs)[1],1))
-
     
-    add = layers.Concatenate(-1)([tdd,representation,representation_mean])
+    add = layers.Concatenate(-1)([tdd,representation])
     representation = TimeDistributed(Dense(2*projection_dim,activation=None))(add)    
     representation =  TimeDistributed(layers.LeakyReLU(alpha=0.01))(representation)
-    outputs = TimeDistributed(Dense(num_feat,activation=None))(representation)
+    outputs = TimeDistributed(Dense(num_feat,activation=None,kernel_initializer="zeros"))(representation)
     
     return  inputs, outputs
 
@@ -170,10 +166,11 @@ def DeepSetsAttClass(
         
 
     representation = layers.LayerNormalization(epsilon=1e-6)(encoded_patches)
-    pooled = tf.reduce_mean(representation,1)
-    
-    representation = Dense(2*projection_dim,activation=None)(pooled)    
-    representation =  layers.LeakyReLU(alpha=0.01)(representation)
-    outputs = Dense(1,activation='sigmoid',kernel_initializer="zeros")(representation)
+    pooled = layers.GlobalAvgPool1D()(representation)
+    representation = Dense(2*projection_dim,activation=None)(pooled)
+    representation = layers.Dropout(0.1)(representation)
+    representation = layers.LeakyReLU(alpha=0.01)(representation)
+        
+    outputs = Dense(1,activation='sigmoid')(representation)
     
     return  inputs, outputs

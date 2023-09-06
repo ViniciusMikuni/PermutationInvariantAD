@@ -183,7 +183,7 @@ def HistRoutine(feed_dict,
                 ax1.plot(xaxis,ratio,color=colors[plot],marker='o',ms=10,lw=0,markerfacecolor='none',markeredgewidth=3)
         
     ax0.legend(loc=label_loc,fontsize=14,ncol=2)
-    ax0.set_ylim(top=2.2*maxy)
+    ax0.set_ylim(top=2.1*maxy)
     if logy:
         ax0.set_yscale('log')
 
@@ -225,11 +225,6 @@ def DataLoader(data_path,labels,
         num_part = particles.shape[1]
         particles=particles.reshape(-1,particles.shape[-1]) #flatten
 
-        def _logit(x):                            
-            alpha = 1e-6
-            x = alpha + (1 - 2*alpha)*x
-            return np.ma.log(x/(1-x)).filled(0)
-
         if save_json:
             mask = particles[:,-1]
             mean_particle = np.average(particles[:,:-1],axis=0,weights=mask)
@@ -253,46 +248,22 @@ def DataLoader(data_path,labels,
         jets = np.ma.divide(jets-data_dict['mean_jet'],np.array(data_dict['std_jet']))
         particles[:,:-1] = np.ma.divide(particles[:,:-1]-data_dict['mean_particle'],np.array(data_dict['std_particle']))
         
-        #particles[:,:-1] += np.random.uniform(-0.5e-3,0.5e-3,size=particles[:,:-1].shape)
-
-        # jets = np.ma.divide(jets-data_dict['min_jet'],np.array(data_dict['max_jet']) - data_dict['min_jet'])
-        # particles[:,:-1] = np.ma.divide(particles[:,:-1]-data_dict['min_particle'],np.array(data_dict['max_particle']) - data_dict['min_particle'])
-
-        
-        # jets = np.ma.divide(jets-data_dict['min_jet'],np.array(data_dict['max_jet'])- data_dict['min_jet']).filled(0)
-        # jets = 2*jets -1.
-        # particles[:,:-1]= np.ma.divide(particles[:,:-1]-data_dict['min_particle'],np.array(data_dict['max_particle'])- data_dict['min_particle']).filled(0)
-        # particles[:,:-1] = 2*particles[:,:-1] -1.
-
-        
-        
         particles = particles.reshape(jets.shape[0],num_part,-1)
         return particles.astype(np.float32),jets.astype(np.float32)
             
             
     for label in labels:        
         with h5.File(os.path.join(data_path,label),"r") as h5f:
-            ntotal = h5f['jet_features'][:].shape[0]
-
-            if use_train:
-                particle = h5f['particle_features'][rank:int(0.7*ntotal):size].astype(np.float32)
-                jet = h5f['jet_features'][rank:int(0.7*ntotal):size].astype(np.float32)
-
-            else:
-                #load evaluation data
-                particle = h5f['particle_features'][int(0.7*ntotal):].astype(np.float32)
-                jet = h5f['jet_features'][int(0.7*ntotal):].astype(np.float32)
-
-
+            particle = h5f['particle_features'][rank::size].astype(np.float32)
+            jet = h5f['jet_features'][rank::size].astype(np.float32)
             particles.append(particle)
             jets.append(jet)
 
     particles = np.concatenate(particles)
     jets = np.concatenate(jets)
-    particles,jets = shuffle(particles,jets, random_state=0)
+
     
     data_size = jets.shape[0]
-
     particles,jets = _preprocessing(particles,jets)
 
     if use_train:
@@ -325,6 +296,6 @@ def DataLoader(data_path,labels,
                 
     else:
         #nevts = particles.shape[0]
-        nevts = 40000
+        nevts = 200000
         mask = np.expand_dims(particles[:nevts,:,-1],-1)
         return particles[:nevts,:,:-1]*mask,jets[:nevts],mask

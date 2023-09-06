@@ -25,7 +25,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()    
     parser.add_argument('--config', default='config_AD.json', help='Config file with training parameters')
-    parser.add_argument('--data_path', default='/global/cfs/cdirs/m3929/TOP', help='Path containing the training files')
+    #parser.add_argument('--data_path', default='/global/cfs/cdirs/m3929/TOP', help='Path containing the training files')
+    parser.add_argument('--data_path', default='/pscratch/sd/v/vmikuni/TOP/', help='Path containing the training files')
     parser.add_argument('--load', action='store_true', default=False,help='Continue training')
     parser.add_argument('--sup', action='store_true', default=False,help='Train a supervised classifier')
     parser.add_argument('--ll', action='store_true', default=False,help='Run the likelihood training')
@@ -34,8 +35,9 @@ if __name__ == "__main__":
     flags = parser.parse_args()
     config = utils.LoadJson(flags.config)
     npart = 100
-        
-    labels = [flags.dataset+'3.h5',flags.dataset+'.h5',flags.dataset+'2.h5',]
+
+    labels = [flags.dataset+'.h5',flags.dataset+'3.h5',]
+    #labels = ['top_tagging.h5']
     #flags.dataset+'.h5',flags.dataset+'2.h5',
     
     data_size,training_data,test_data = utils.DataLoader(flags.data_path,
@@ -44,6 +46,9 @@ if __name__ == "__main__":
                                                          hvd.rank(),hvd.size(),
                                                          use_train=True,
                                                          batch_size=config['BATCH'])
+
+    if hvd.rank()==0:
+        print("Loaded {} events".format(data_size))
 
     if flags.sup:
         train_data_bkg, test_data_bkg = utils.DataLoader(flags.data_path,
@@ -107,7 +112,7 @@ if __name__ == "__main__":
     )
     opt = tf.keras.optimizers.Adamax(learning_rate=lr_schedule)
 
-    # opt = tf.keras.optimizers.Adam(learning_rate=config['LR']*np.sqrt(hvd.size()))
+    # opt = tf.keras.optimizers.Adam(learning_rate=config['LR']*np.sqrt(hvd.size()),beta_2=0.99)
 
     
     opt = hvd.DistributedOptimizer(
@@ -124,7 +129,7 @@ if __name__ == "__main__":
     callbacks = [
         hvd.callbacks.BroadcastGlobalVariablesCallback(0),
         hvd.callbacks.MetricAverageCallback(),
-        EarlyStopping(patience=30,restore_best_weights=True),
+        EarlyStopping(patience=50,restore_best_weights=True),
     ]
 
         
