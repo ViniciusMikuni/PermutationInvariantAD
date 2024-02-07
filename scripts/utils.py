@@ -28,12 +28,21 @@ colors = {
     'HV_ll':'#7570b3'
 }
 
+colors_add = {
+    'gluon_tagging':'#d95f02',
+    'top_tagging':'#1b9e77',
+    'HV':'#d7191c',
+    'gluon_tagging_ll':'#d95f02',
+    'top_tagging_ll':'#1b9e77',
+    'HV_ll':'#d7191c'
+}
+
 name_translate={
     'gluon_tagging':'QCD',
-    'top_tagging':'Top quark',
+    'top_tagging':'Top',
     'HV': "Z'",
     'gluon_tagging_ll':'QCD Max. Likelihood',
-    'top_tagging_ll':'Top quark Max. Likelihood',
+    'top_tagging_ll':'Top Max. Likelihood',
     'HV_ll': "Z' Max. Likelihood"
 }
 
@@ -214,7 +223,6 @@ def SaveJson(save_file,data):
 
 
 def DataLoader(data_path,labels,
-               part,
                rank=0,size=1,
                use_train=True,
                batch_size=64,make_tf_data=True):
@@ -240,9 +248,9 @@ def DataLoader(data_path,labels,
                 
             }                
             
-            SaveJson('preprocessing_{}.json'.format(part),data_dict)
+            SaveJson('preprocessing_gluon_tagging.json',data_dict)
         else:
-            data_dict = LoadJson('preprocessing_{}.json'.format(part))
+            data_dict = LoadJson('preprocessing_gluon_tagging.json')
 
         #normalize
         jets = np.ma.divide(jets-data_dict['mean_jet'],np.array(data_dict['std_jet']))

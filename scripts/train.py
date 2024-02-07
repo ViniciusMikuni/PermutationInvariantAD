@@ -42,7 +42,6 @@ if __name__ == "__main__":
     
     data_size,training_data,test_data = utils.DataLoader(flags.data_path,
                                                          labels,
-                                                         'gluon_tagging',
                                                          hvd.rank(),hvd.size(),
                                                          use_train=True,
                                                          batch_size=config['BATCH'])
@@ -53,7 +52,6 @@ if __name__ == "__main__":
     if flags.sup:
         train_data_bkg, test_data_bkg = utils.DataLoader(flags.data_path,
                                                          ['gluon_tagging.h5'],
-                                                         'gluon_tagging',
                                                          hvd.rank(),hvd.size(),
                                                          use_train=True,
                                                          make_tf_data = False,
@@ -61,7 +59,6 @@ if __name__ == "__main__":
 
         train_data_sig, test_data_sig = utils.DataLoader(flags.data_path,
                                                          ['top_tagging.h5'],
-                                                         'gluon_tagging',
                                                          hvd.rank(),hvd.size(),
                                                          use_train=True,
                                                          make_tf_data = False,

@@ -116,7 +116,7 @@ if __name__ == "__main__":
                        jets,masks)
 
         nll_list[process] = -nll['ll_part']
-        
+        print(nll_list[process])
         ax0.plot(range(flags.nshuffle),
                  nll_list[process],
                  ls='none',

@@ -15,7 +15,7 @@ import sys
 from sklearn.metrics import roc_curve, auc
 
 
-def evaluate(model,particles,jets,mask,idx=0,nsplit=200):
+def evaluate(model,particles,jets,mask,idx=0,nsplit=5):
     part_split = np.array_split(particles,nsplit)
     jet_split = np.array_split(jets,nsplit)
     mask_split = np.array_split(mask,nsplit)
@@ -46,14 +46,12 @@ def evaluate_classifier(num_feat,checkpoint_folder,data_path):
     #load the data
     data_bkg, _, _ = utils.DataLoader(data_path,
                                       ['gluon_tagging.h5'],
-                                      'gluon_tagging',
                                       use_train=False,
                                       make_tf_data = False,
     )
 
     data_sig,_,_ = utils.DataLoader(data_path,
                                     ['top_tagging.h5'],
-                                    'gluon_tagging',
                                     use_train=False,
                                     make_tf_data = False,
     )
@@ -78,7 +76,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     #parser.add_argument('--data_folder', default='/global/cfs/cdirs/m3929/TOP', help='Folder containing data and MC files')
-    parser.add_argument('--data_folder', default='/pscratch/sd/v/vmikuni/TOP/', help='Folder containing data and MC files')
+    parser.add_argument('--data_folder', default='/pscratch/sd/v/vmikuni/TOP/GSGM', help='Folder containing data and MC files')
     parser.add_argument('--plot_folder', default='../plots', help='Folder to save results')
     parser.add_argument('--config', default='config_AD.json', help='Training parameters')
 
@@ -97,8 +95,8 @@ if __name__ == "__main__":
     if flags.ll:
         model_name+='_ll'
 
-    #processes = ['gluon_tagging','top_tagging']
     processes = ['gluon_tagging','top_tagging','HV']
+    
     
     if flags.sample:    
         nll_qcd = {}
@@ -117,8 +115,7 @@ if __name__ == "__main__":
         for process in processes:
             print(process)
             particles,jets,mask = utils.DataLoader(flags.data_folder,
-                                                   labels=['%s2.h5'%process],
-                                                   part='gluon_tagging', 
+                                                   labels=['%s.h5'%process],
                                                    use_train=False,
                                                    make_tf_data=False)
 
@@ -149,6 +146,11 @@ if __name__ == "__main__":
                 nll_qcd[process] = {}
                 for ll in ['ll_part','ll_jet','N']: 
                     nll_qcd[process][ll] = h5f["{}_{}".format(process,ll)][:]
+                    
+        with h5.File(os.path.join(flags.data_folder,model_name + '_gluon_tagging_HV.h5'),"r") as h5f:
+            for ll in ['ll_part','ll_jet','N']: 
+                nll_qcd['HV'][ll] = h5f["HV_orig_{}".format(ll)][:]
+                    
                 
 
         #LL training
@@ -166,6 +168,12 @@ if __name__ == "__main__":
                 nll_top[process] = {}
                 for ll in ['ll_part','ll_jet','N']: 
                     nll_top[process][ll] = h5f["{}_{}".format(process,ll)][:]
+
+
+        with h5.File(os.path.join(flags.data_folder,model_name + '_top_tagging_HV.h5'),"r") as h5f:
+            for ll in ['ll_part','ll_jet','N']: 
+                nll_top['HV'][ll] = h5f["HV_orig_{}".format(ll)][:]
+        
 
 
         with h5.File(os.path.join(flags.data_folder,model_name + '_ll_top_tagging.h5'),"r") as h5f:
@@ -195,11 +203,6 @@ if __name__ == "__main__":
                 print("Avg anomaly score gluon model: {}".format(np.mean(nll_qcd_anomaly[process+ll])))
                 print("Avg anomaly score top model: {}".format(np.mean(nll_top_anomaly[process+ll])))
                 
-        # np.savez('npys/Pq_QCD_diffusion.npz',nll_qcd_anomaly['gluon_tagging'])
-        # np.savez('npys/Pt_QCD_diffusion.npz',nll_top_anomaly['gluon_tagging'])
-        # np.savez('npys/Pq_Top_diffusion.npz',nll_qcd_anomaly['top_tagging'])
-        # np.savez('npys/Pt_Top_diffusion.npz',nll_top_anomaly['top_tagging'])
-        
         fig,ax,_ = utils.HistRoutine(nll_qcd_anomaly,plot_ratio=False,
                                      xlabel='Anomaly Score',
                                      #xlabel='Negative Log-likelihood',
@@ -280,13 +283,12 @@ if __name__ == "__main__":
         tpr_dict = {}
         anomalies = ['top_tagging','HV','top_tagging_ll','HV_ll']
         for anomaly in anomalies:
-            #HV
             likelihoods = np.concatenate([nll_qcd_anomaly['gluon_tagging'],nll_qcd_anomaly[anomaly]],0)
             labels = np.concatenate([np.zeros(nll_qcd_anomaly['gluon_tagging'].shape[0]),
                                      np.ones(nll_qcd_anomaly[anomaly].shape[0])],0)
     
             fpr, tpr, _ = roc_curve(labels,likelihoods, pos_label=1)
-            print("Unsup. {} AUC: {}".format(anomaly, auc(fpr, tpr)))
+            print("Unsup.Gluon vs {} AUC: {}".format(anomaly, auc(fpr, tpr)))
         
             if flags.sup ==False:
                 plt.plot(tpr,fpr,label="QCD vs {}".format(utils.name_translate[anomaly]),
@@ -295,22 +297,40 @@ if __name__ == "__main__":
             fpr_dict[anomaly] = fpr
             tpr_dict[anomaly] = tpr
 
+        inverse_anomalies = ['gluon_tagging','HV','gluon_tagging_ll','HV_ll']
+        for anomaly in inverse_anomalies:
+            likelihoods = np.concatenate([nll_top_anomaly['top_tagging'],nll_top_anomaly[anomaly]],0)
+            labels = np.concatenate([np.zeros(nll_qcd_anomaly['top_tagging'].shape[0]),
+                                     np.ones(nll_qcd_anomaly[anomaly].shape[0])],0)
+    
+            fpr, tpr, _ = roc_curve(labels,likelihoods, pos_label=1)
+            print("Unsup.Top vs {} AUC: {}".format(anomaly, auc(fpr, tpr)))
+        
+            if flags.sup ==False:
+                plt.plot(tpr,fpr,label="Top vs {}".format(utils.name_translate[anomaly]),
+                         color=utils.colors_add[anomaly],linestyle=utils.line_style[anomaly])
+
+            # fpr_dict[anomaly] = fpr
+            # tpr_dict[anomaly] = tpr
+                            
         if flags.sup ==False:
             plt.yscale('log')
-            plt.legend(frameon=False,fontsize=14)
-            fig.savefig('{}/{}.pdf'.format(flags.plot_folder,"unsupervised_ROC"))
+            plt.ylim(1e-6, 1)
+            plt.legend(frameon=False,fontsize=12,ncols=2)
+            fig.savefig('{}/unsupervised_ROC.pdf'.format(flags.plot_folder))
 
 
         fig,gs = utils.SetFig("True positive rate","TPR/Sqrt(FPR)")
 
         anomalies = ['top_tagging','HV','top_tagging_ll','HV_ll']
-        #,'HV','top_tagging_ll','HV_ll'
+
         for anomaly in anomalies:
             print(anomaly,np.max(np.ma.divide(tpr_dict[anomaly],np.sqrt(fpr_dict[anomaly]))))
             plt.plot(fpr_dict[anomaly],np.ma.divide(tpr_dict[anomaly],np.sqrt(fpr_dict[anomaly])).filled(0),
                      label="QCD vs {}".format(utils.name_translate[anomaly]),
                      color=utils.colors[anomaly],linestyle=utils.line_style[anomaly])
             
+        plt.xscale('log')
         plt.legend(frameon=False,fontsize=14)
-        fig.savefig('{}/{}.pdf'.format(flags.plot_folder,"SIC"))
+        fig.savefig('{}/SIC.pdf'.format(flags.plot_folder))
     
